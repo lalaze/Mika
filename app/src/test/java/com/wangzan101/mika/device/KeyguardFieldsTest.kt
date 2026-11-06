@@ -15,6 +15,80 @@ class KeyguardFieldsTest {
             "com.android.keyguard.PasswordTextView", true, false, false))
     }
 
+    @Test fun editableStockPinWithInputType16OnlyMatchesPinRegardlessOfDigitPad() {
+        // TYPE_NUMBER_VARIATION_PASSWORD alone (16) has no TYPE_CLASS_NUMBER bits and is not TYPE_NULL.
+        val inputType = 16
+        val numeric = inputType and 0x0f == 2
+        val untyped = inputType == 0
+        assertFalse(numeric)
+        assertFalse(untyped)
+        for (digitPad in listOf(false, true)) {
+            val kinds = CredentialKind.entries.filter { kind ->
+                KeyguardFields.matches(kind, "com.android.systemui:id/pinEntry", "com.android.keyguard.PasswordTextView",
+                    password = true, editable = true, numeric = numeric, untyped = untyped, digitPad = digitPad)
+            }
+            assertEquals(listOf(CredentialKind.Pin), kinds)
+        }
+    }
+
+    @Test fun stockPinIsExclusiveForAllEditableAndInputTypeFlags() {
+        for (editable in listOf(false, true)) for (numeric in listOf(false, true)) {
+            for (untyped in listOf(false, true)) for (digitPad in listOf(false, true)) {
+                val kinds = CredentialKind.entries.filter { kind ->
+                    KeyguardFields.matches(kind, "com.android.systemui:id/pinEntry", "com.android.keyguard.PasswordTextView",
+                        password = true, editable = editable, numeric = numeric, untyped = untyped, digitPad = digitPad)
+                }
+                assertEquals(listOf(CredentialKind.Pin), kinds)
+            }
+        }
+    }
+
+    @Test fun pinEntryWithWrongClassDoesNotUseStockPinBranch() {
+        for (digitPad in listOf(false, true)) {
+            val kinds = CredentialKind.entries.filter { kind ->
+                KeyguardFields.matches(kind, "com.android.systemui:id/pinEntry", "android.widget.EditText",
+                    password = true, editable = true, numeric = false, untyped = false, digitPad = digitPad)
+            }
+            assertEquals(listOf(CredentialKind.Password), kinds)
+            for (kind in CredentialKind.entries) {
+                assertFalse(KeyguardFields.matches(kind, "com.android.systemui:id/pinEntry", "android.widget.EditText",
+                    password = true, editable = false, numeric = false, untyped = false, digitPad = digitPad))
+            }
+        }
+    }
+
+    @Test fun nonStockInputType16DoesNotBecomePin() {
+        val inputType = 16
+        for (id in listOf("com.android.systemui:id/passwordEntry", "com.android.systemui:id/bouncer_text_entry")) {
+            for (className in listOf("android.widget.EditText", "com.android.keyguard.PasswordTextView")) {
+                for (digitPad in listOf(false, true)) {
+                    val kinds = CredentialKind.entries.filter { kind ->
+                        KeyguardFields.matches(kind, id, className, password = true, editable = true,
+                            numeric = inputType and 0x0f == 2, untyped = inputType == 0, digitPad = digitPad)
+                    }
+                    assertEquals(listOf(CredentialKind.Password), kinds)
+                }
+            }
+        }
+    }
+
+    @Test fun stockPinBranchCannotBypassPasswordNamespaceOrSimGates() {
+        val rejected = listOf(
+            "com.android.systemui:id/pinEntry" to false,
+            "other:id/pinEntry" to true,
+            "com.android.systemui.extra:id/pinEntry" to true,
+            "com.android.systemui:idFake/pinEntry" to true,
+            "com.android.systemui:id/simPinEntry" to true,
+            "com.android.systemui:id/SIMPinEntry" to true,
+        )
+        for ((id, password) in rejected) for (kind in CredentialKind.entries) {
+            for (editable in listOf(false, true)) for (numeric in listOf(false, true)) {
+                assertFalse(KeyguardFields.matches(kind, id, "com.android.keyguard.PasswordTextView", password,
+                    editable = editable, numeric = numeric, untyped = true, digitPad = true))
+            }
+        }
+    }
+
     @Test fun editablePasswordAndPinHaveDistinctTypes() {
         assertTrue(KeyguardFields.matches(CredentialKind.Password, "com.android.systemui:id/passwordEntry", "android.widget.EditText", true, true, false))
         assertTrue(KeyguardFields.matches(CredentialKind.Pin, "com.android.systemui:id/pinEntry", "android.widget.EditText", true, true, true))
