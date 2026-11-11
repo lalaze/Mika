@@ -140,14 +140,12 @@ class DeviceAccess(private val port: DeviceAccessPort, private val store: Device
             if (!store.beginAttempt(it)) return@withLock result("attempt_blocked", read())
             // 从此刻起中断也保留占位,不重复输入。只有系统已解锁才清掉。
             if (!allowed()) return@withLock result("disabled", read())
-            if (!port.enter(it)) {
-                val after = read()
-                if (after?.ready == true) { store.completeAttempt(it); return@withLock result("unlocked", after) }
-                return@withLock result("input_failed", after)
-            }
+            // 按键返回失败也照样等系统状态:最后一位自动提交或回车生效后锁屏正在退场,焦点已离开 SystemUI,
+            // 收尾按键会被拒;只查一次会把这次成功的解锁当成失败,占位就再也清不掉。
+            val entered = port.enter(it)
             now = await { s -> s.ready } ?: return@withLock result("device_unavailable")
             if (now.ready) { store.completeAttempt(it); result("unlocked", now) }
-            else result("unlock_failed", now)
+            else result(if (entered) "unlock_failed" else "input_failed", now)
         }
     }
 
