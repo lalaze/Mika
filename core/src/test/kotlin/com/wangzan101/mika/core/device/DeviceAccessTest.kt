@@ -35,6 +35,8 @@ class DeviceAccessTest {
         var fallbacks = 0
         var entries = 0
         var inputWorks = true
+        var inputReports = true
+        var unlockLagMs = 0L
         var readyTarget = true
         var suspendInput = false
         var falselyReportsWake = false
@@ -45,7 +47,12 @@ class DeviceAccessTest {
         var diagnostics: List<String> = emptyList()
         override suspend fun detectedCredentialKind() = detect?.invoke() ?: visibleKind
         override suspend fun credentialDiagnostics() = diagnostics
-        override suspend fun state() = current
+        var unlockAt = Long.MAX_VALUE
+        var clock: () -> Long = { 0L }
+        override suspend fun state(): DeviceState {
+            if (clock() >= unlockAt) current = current.copy(keyguardShowing = false, deviceLocked = false)
+            return current
+        }
         override suspend fun wake(): Boolean {
             wakes++
             if (!falselyReportsWake) current = current.copy(interactive = true)
@@ -64,8 +71,11 @@ class DeviceAccessTest {
             entries++
             if (suspendInput) awaitCancellation()
             delay(20)
-            if (inputWorks) current = current.copy(keyguardShowing = false, deviceLocked = false)
-            return true
+            if (inputWorks) {
+                if (unlockLagMs == 0L) current = current.copy(keyguardShowing = false, deviceLocked = false)
+                else unlockAt = clock() + unlockLagMs
+            }
+            return inputReports
         }
     }
 
@@ -193,6 +203,29 @@ class DeviceAccessTest {
         assertEquals("attempt_blocked", d.unlock().status)
         assertEquals(1, p.entries)
         assertTrue(s.attemptBlocked)
+    }
+
+    @Test fun lateUnlockAfterRejectedTrailingKeyClearsTheLatchAndAllowsTheNextUnlock() = runTest {
+        // 最后一位自动提交后锁屏退场,收尾按键被拒,enter 报失败;系统稍后才报告已解锁。
+        val p = Port().apply { inputReports = false; unlockLagMs = 300; clock = { testScheduler.currentTime } }
+        val s = Store(); val d = DeviceAccess(p, s, 10, 1_000)
+        assertEquals("unlocked", d.unlock().status)
+        assertFalse(s.attemptBlocked)
+        assertTrue(s.last!!.value.all { it == '\u0000' })
+        // 重新锁屏后下一次仍能输入。
+        p.unlockAt = Long.MAX_VALUE
+        p.current = p.current.copy(keyguardShowing = true, deviceLocked = true)
+        assertEquals("unlocked", d.unlock().status)
+        assertEquals(2, p.entries)
+        assertFalse(s.attemptBlocked)
+    }
+
+    @Test fun rejectedInputWithoutUnlockStillLatches() = runTest {
+        val p = Port().apply { inputWorks = false; inputReports = false }; val s = Store(); val d = DeviceAccess(p, s, 10, 30)
+        assertEquals("input_failed", d.unlock().status)
+        assertTrue(s.attemptBlocked)
+        assertEquals("attempt_blocked", d.unlock().status)
+        assertEquals(1, p.entries)
     }
 
     @Test fun unknownTargetAndMissingCredentialNeverEnter() = runTest {
