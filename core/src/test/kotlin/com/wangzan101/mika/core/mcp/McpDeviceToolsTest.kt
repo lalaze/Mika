@@ -25,7 +25,7 @@ class McpDeviceToolsTest {
         override suspend fun wake(): Boolean { writes++; return true }
         override suspend fun dismiss(): Boolean { writes++; return true }
         override suspend fun credentialReady(kind: CredentialKind) = false
-        override suspend fun enter(credential: DeviceCredential): Boolean { writes++; return false }
+        override suspend fun enter(credential: DeviceCredential): CredentialEntry { writes++; return CredentialEntry.NotSent }
     }
     private val tools = McpTaskTools(FakeRemoteTasks(), device = DeviceAccess(port, store))
 

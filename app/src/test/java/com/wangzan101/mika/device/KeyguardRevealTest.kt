@@ -1,7 +1,9 @@
 package com.wangzan101.mika.device
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class KeyguardRevealTest {
@@ -36,6 +38,14 @@ class KeyguardRevealTest {
     @Test fun candidatesOutsideTheWindowAreIgnored() {
         val outside = KeyguardReveal.Candidate(b(-500, 1600, 100, 2100), clickable = true, digit = false)
         assertNull(KeyguardReveal.fallbackTarget(listOf(outside), window, 0.08f))
+    }
+
+    @Test fun revealGesturesAreOnlyForPagesWithoutAnyCredentialInput() {
+        // 通知/指纹页:没有密码节点,也没有完整数字键盘,才需要露出凭据页
+        assertFalse(KeyguardReveal.credentialPageShowing(passwordNodes = 0, digitPads = 0))
+        // 凭据页已经在屏上(哪怕还没聚焦或类型对不上):手势会落在数字键上,不做
+        assertTrue(KeyguardReveal.credentialPageShowing(passwordNodes = 1, digitPads = 0))
+        assertTrue(KeyguardReveal.credentialPageShowing(passwordNodes = 0, digitPads = 1))
     }
 
     @Test fun centerIsTheMidpoint() {

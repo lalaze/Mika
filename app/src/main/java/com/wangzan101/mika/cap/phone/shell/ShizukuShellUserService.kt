@@ -147,7 +147,7 @@ class ShizukuShellUserService : IMikaShell.Stub {
 
     override fun dismissDeviceKeyguard(): Boolean = delegate.dismissDeviceKeyguard()
 
-    override fun enterDeviceCredential(kind: Int, credential: ByteArray, clear: Int): Boolean =
+    override fun enterDeviceCredential(kind: Int, credential: ByteArray, clear: Int): Int =
         delegate.enterDeviceCredential(kind, credential, clear)
 
     override fun getAudioModeInUser(packageName: String, userId: Int): String? =

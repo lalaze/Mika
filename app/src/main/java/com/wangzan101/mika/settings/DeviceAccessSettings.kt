@@ -82,6 +82,12 @@ class DeviceAccessSettings(private val dir: File, private val cipher: KeyCipher)
         if (config.value.revision == credential.revision) update(config.value.copy(blocked = false, localBlocked = false))
     }
 
+    /** 只撤这次调用落下的那一个占位;另一个可能是之前真失败落下的,保持原样。修订号变了说明凭据已重存,两个占位当时已一起解除。 */
+    @Synchronized override fun releaseAttempt(credential: DeviceCredential, local: Boolean) {
+        if (config.value.revision != credential.revision) return
+        update(if (local) config.value.copy(localBlocked = false) else config.value.copy(blocked = false))
+    }
+
     private fun read(): JsonObject? {
         if (!file.isFile) return null
         val bytes = cipher.decrypt(file.readBytes())

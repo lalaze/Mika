@@ -12,6 +12,8 @@ import android.view.Display
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import com.wangzan101.mika.cap.phone.a11y.ScreenAccessibility
+import com.wangzan101.mika.cap.phone.shell.DeviceUnlockInput
+import com.wangzan101.mika.core.device.CredentialEntry
 import com.wangzan101.mika.core.device.CredentialKind
 import com.wangzan101.mika.core.device.DeviceAccess
 import com.wangzan101.mika.core.device.DeviceAccessPort
@@ -43,7 +45,18 @@ internal class AndroidDeviceAccessPort(context: Context, private val helper: () 
     override suspend fun wake(): Boolean = withContext(Dispatchers.IO) { runCatching { helper()?.wakeDevice() == true }.getOrDefault(false) }
     override suspend fun dismiss(): Boolean = withContext(Dispatchers.IO) { runCatching { helper()?.dismissDeviceKeyguard() == true }.getOrDefault(false) }
     override suspend fun revealCredential(): Boolean = withContext(Dispatchers.IO) {
-        runCatching { helper()?.revealDeviceCredential() == true }.getOrDefault(false)
+        if (credentialPageShowing()) return@withContext false
+        val ok = runCatching { helper()?.revealDeviceCredential() == true }.getOrDefault(false)
+        Log.i(TAG, "keyguard: reveal swipe sent=$ok")
+        ok
+    }
+
+    /**
+     * 上滑和回退点击只用来把凭据页露出来。屏上已经有密码框或完整数字键盘时(只是还没聚焦、类型对不上或有歧义)不做:
+     * 手势会划过或点中数字键,给后面要输入的凭据前面多垫一位。
+     */
+    private fun credentialPageShowing(): Boolean = scanCredentialFields().credentialPage.also {
+        if (it) Log.i(TAG, "keyguard: credential page already showing, reveal gesture skipped")
     }
 
     /**
@@ -53,6 +66,7 @@ internal class AndroidDeviceAccessPort(context: Context, private val helper: () 
     override suspend fun revealCredentialFallback(): Boolean = withContext(Dispatchers.IO) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return@withContext false
         if (!power.isInteractive || !keyguard.isKeyguardLocked || !keyguard.isDeviceLocked) return@withContext false
+        if (credentialPageShowing()) return@withContext false
         val service = ScreenAccessibility.instance.value ?: return@withContext false
         for (window in service.windowsOn(Display.DEFAULT_DISPLAY)) {
             val root = window.root ?: continue
@@ -115,7 +129,9 @@ internal class AndroidDeviceAccessPort(context: Context, private val helper: () 
     }
 
     private data class CredentialTarget(val node: AccessibilityNodeInfo?, val window: AccessibilityWindowInfo, val kind: CredentialKind)
-    private data class CredentialScan(val targets: List<CredentialTarget>, val diagnostics: List<String>)
+    /** [credentialPage]:任一 SystemUI 窗口里有可见的密码节点或 0–9 齐全的数字键,不管能不能认成输入目标。 */
+    private data class CredentialScan(val targets: List<CredentialTarget>, val diagnostics: List<String>,
+        val credentialPage: Boolean = false)
 
     private fun credentialFields(): List<CredentialTarget> = scanCredentialFields().targets
 
@@ -134,6 +150,7 @@ internal class AndroidDeviceAccessPort(context: Context, private val helper: () 
         val pinPads = mutableListOf<CredentialTarget>()
         val diagnostics = mutableListOf<String>()
         var passwordNodes = 0
+        var digitPads = 0
         val windows = service.windowsOn(Display.DEFAULT_DISPLAY)
         diagnostics += "display_windows=${windows.size}"
         windows.take(MAX_WINDOW_DIAGNOSTICS).forEachIndexed { index, window ->
@@ -169,6 +186,7 @@ internal class AndroidDeviceAccessPort(context: Context, private val helper: () 
             visit(root, 0)
             passwordNodes += candidates.size
             val pad = KeyguardFields.isDigitPad(digits)
+            if (pad) digitPads++
             val bounds = Rect().also(window::getBoundsInScreen)
             val pinLayout = KeyguardPinPad.matches(padKeys,
                 KeyguardPinPad.Bounds(bounds.left, bounds.top, bounds.right, bounds.bottom))
@@ -192,16 +210,35 @@ internal class AndroidDeviceAccessPort(context: Context, private val helper: () 
         }
         // 有密码节点时沿用原路径,即使它无法识别也不猜测;没有时才考虑纯数字 PIN 页。
         val targets = if (passwordNodes == 0) pinPads else fields
-        return CredentialScan(targets, diagnostics.take(MAX_DIAGNOSTICS))
+        return CredentialScan(targets, diagnostics.take(MAX_DIAGNOSTICS),
+            KeyguardReveal.credentialPageShowing(passwordNodes, digitPads))
     }
 
-    override suspend fun enter(credential: DeviceCredential): Boolean {
-        if (!credentialReady(credential.kind)) return false
+    /**
+     * 输入前再确认一次目标。助手不在、目标没了都是确定什么都没发;助手调用中途出错则不知道发了多少,按不确定算。
+     * 日志只记结果类别和有没有回删残留,不含凭据及其长度。
+     */
+    override suspend fun enter(credential: DeviceCredential): CredentialEntry {
+        if (!credentialReady(credential.kind)) {
+            Log.i(TAG, "keyguard: entry not sent, target no longer ready")
+            return CredentialEntry.NotSent
+        }
         return withContext(Dispatchers.IO) {
             val clear = residualClear(credential.kind)
             val bytes = ByteArray(credential.value.size) { credential.value[it].code.toByte() }
-            try { runCatching { helper()?.enterDeviceCredential(credential.kind.ordinal, bytes, clear) == true }.getOrDefault(false) }
-            finally { bytes.fill(0) }
+            try {
+                val shell = helper() ?: return@withContext CredentialEntry.NotSent.also {
+                    Log.i(TAG, "keyguard: entry not sent, helper unavailable")
+                }
+                val code = runCatching { shell.enterDeviceCredential(credential.kind.ordinal, bytes, clear) }.getOrNull()
+                val entry = when (code) {
+                    DeviceUnlockInput.ENTRY_NOT_SENT -> CredentialEntry.NotSent
+                    DeviceUnlockInput.ENTRY_SENT -> CredentialEntry.Sent
+                    else -> CredentialEntry.Incomplete
+                }
+                Log.i(TAG, "keyguard: entry $entry, residual cleared=${clear > 0}")
+                entry
+            } finally { bytes.fill(0) }
         }
     }
 

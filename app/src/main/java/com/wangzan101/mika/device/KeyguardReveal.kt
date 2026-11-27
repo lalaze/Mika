@@ -26,6 +26,12 @@ internal object KeyguardReveal {
             ?.bounds
     }
 
+    /**
+     * 屏上已经有凭据输入界面:可见的密码节点,或 0–9 齐全的数字键。这时不再做上滑/回退点击——
+     * 这些手势只用来把凭据页露出来,落在已经出现的数字键盘上会多输入一位。
+     */
+    fun credentialPageShowing(passwordNodes: Int, digitPads: Int): Boolean = passwordNodes > 0 || digitPads > 0
+
     fun center(bounds: Bounds): Pair<Int, Int> = (bounds.left + bounds.right) / 2 to (bounds.top + bounds.bottom) / 2
 
     private fun valid(b: Bounds): Boolean = b.right > b.left && b.bottom > b.top

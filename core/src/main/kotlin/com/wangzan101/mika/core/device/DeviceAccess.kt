@@ -12,6 +12,12 @@ data class DeviceState(val interactive: Boolean, val keyguardShowing: Boolean, v
 
 enum class CredentialKind { Pin, Password }
 
+/**
+ * 一次凭据输入的结果。[NotSent] 必须是确定一个键都没送到锁屏;拿不准(助手中断、只送达前几位)一律算 [Incomplete]。
+ * [Sent] 只表示按键全部送达,不代表系统接受了凭据。
+ */
+enum class CredentialEntry { NotSent, Incomplete, Sent }
+
 /** 凭据只在本机确定性流程内短暂存在;不提供带原文的 toString。用完擦除。 */
 class DeviceCredential(val kind: CredentialKind, val value: CharArray, val revision: String = "") : AutoCloseable {
     override fun close() { value.fill('\u0000') }
@@ -39,10 +45,13 @@ interface DeviceAccessPort {
     suspend fun detectedCredentialKind(): CredentialKind? = null
     /** 认不出凭据页时给出不含屏上文字和凭据的受限诊断,便于定位通用识别规则的缺口。 */
     suspend fun credentialDiagnostics(): List<String> = emptyList()
-    suspend fun enter(credential: DeviceCredential): Boolean
+    suspend fun enter(credential: DeviceCredential): CredentialEntry
 }
 
-/** 许可和凭据来自手机设置,电脑不能修改。输入前持久化占位,失败/取消/崩溃后不再自动重试。 */
+/**
+ * 许可和凭据来自手机设置,电脑不能修改。输入前持久化占位,失败/取消/崩溃后不再自动重试。
+ * 占位防的是把错误凭据反复提交给系统;确定一个键都没送达的那次不算尝试,由 [releaseAttempt] 撤掉这次的占位。
+ */
 interface DeviceAccessStore {
     val enabled: Boolean
     /** 本机任务的独立开关,与 [enabled] 互不带动;默认关。 */
@@ -54,6 +63,11 @@ interface DeviceAccessStore {
     /** 本机任务输入凭据前落自己的占位;开关关着或已暂停时返回 false。 */
     fun beginLocalAttempt(): Boolean = false
     fun completeAttempt(credential: DeviceCredential)
+    /**
+     * 撤掉这次调用自己落的那一个占位([local] 为本机占位,否则为远程占位),只在确定一个键都没送达锁屏时用;
+     * 另一个占位不动。缺省什么都不做,即保留占位:宁可让用户重设一次,也不重复提交。
+     */
+    fun releaseAttempt(credential: DeviceCredential, local: Boolean) {}
 }
 
 data class DeviceAccessResult(val status: String, val state: DeviceState?, val enabled: Boolean,
@@ -119,54 +133,70 @@ class DeviceAccess(private val port: DeviceAccessPort, private val store: Device
         val credential = store.credential() ?: return@withLock result("credential_required", now)
         credential.use {
             if (!DeviceCredential.valid(it.kind, it.value)) return@withLock result("credential_unavailable", now)
-            var targetReady = false
-            var revealed = false
+            var revealedAt = -1L
             var fallbackTried = false
             var waited = 0L
-            while (!targetReady && waited < waitMs) {
-                val current = read() ?: return@withLock result("device_unavailable")
-                if (current.ready) return@withLock result("unlocked", current)
-                if (!allowed()) return@withLock result("disabled", current)
-                if (!current.helperAvailable) return@withLock result("helper_unavailable", current)
-                targetReady = port.credentialReady(it.kind)
-                // dismiss 后先给系统凭据页一个轮询周期;仍认不出时才做一次导航,避免在已经可用的 PIN 页上多余滑动。
-                if (!targetReady) {
-                    if (!revealed && waited >= pollMs) {
-                        if (!allowed()) return@withLock result("disabled", current)
-                        revealed = true
-                        port.revealCredential()
-                    } else if (revealed && !fallbackTried && waited >= pollMs * 2) {
-                        // 上滑后仍是生物识别优先页(没有凭据框)时,再给一次回退点击的机会。
-                        if (!allowed()) return@withLock result("disabled", current)
-                        fallbackTried = true
-                        port.revealCredentialFallback()
+            for (round in 1..ENTRY_ROUNDS) {
+                var targetReady = false
+                val deadline = waited + waitMs
+                while (!targetReady && waited < deadline) {
+                    val current = read() ?: return@withLock result("device_unavailable")
+                    if (current.ready) return@withLock result("unlocked", current)
+                    if (!allowed()) return@withLock result("disabled", current)
+                    if (!current.helperAvailable) return@withLock result("helper_unavailable", current)
+                    targetReady = port.credentialReady(it.kind)
+                    // 凭据页滑入和无障碍树更新都要时间。手势发早了会落在正在出现的凭据页上(划过或点中数字键),
+                    // 多出来的一位会让正确的凭据被系统判错。所以等够了仍认不出才导航,回退点击再等上滑后的页面稳定。
+                    if (!targetReady) {
+                        if (revealedAt < 0 && waited >= pollMs * REVEAL_AFTER_POLLS) {
+                            if (!allowed()) return@withLock result("disabled", current)
+                            revealedAt = waited
+                            port.revealCredential()
+                        } else if (revealedAt >= 0 && !fallbackTried && waited - revealedAt >= pollMs * FALLBACK_AFTER_POLLS) {
+                            // 上滑后仍是生物识别优先页(没有凭据框)时,再给一次回退点击的机会。
+                            if (!allowed()) return@withLock result("disabled", current)
+                            fallbackTried = true
+                            port.revealCredentialFallback()
+                        }
+                        delay(pollMs); waited += pollMs
                     }
+                }
+                if (!targetReady) {
+                    val current = read() ?: return@withLock result("device_unavailable")
+                    if (current.ready) return@withLock result("unlocked", current)
+                    if (!allowed()) return@withLock result("disabled", current)
+                    if (!current.helperAvailable) return@withLock result("helper_unavailable", current)
+                    val detected = port.detectedCredentialKind()
+                    val diagnostics = port.credentialDiagnostics()
+                    if (detected != null && detected != it.kind) {
+                        return@withLock result("credential_kind_mismatch", current, it.kind, detected, diagnostics)
+                    }
+                    return@withLock result("unsupported_keyguard", current, keyguardDiagnostics = diagnostics)
+                }
+                if (!allowed()) return@withLock result("disabled", read())
+                val reserved = if (local) store.beginLocalAttempt() else store.beginAttempt(it)
+                if (!reserved) return@withLock result("attempt_blocked", read())
+                // 从此刻起中断也保留占位,不重复输入。只有系统已解锁、或确定一个键都没送达才清掉。
+                if (!allowed()) return@withLock result("disabled", read())
+                val entry = port.enter(it)
+                if (entry == CredentialEntry.NotSent) {
+                    // 凭据页在最后一刻失焦、被收起或熄屏:锁屏什么都没收到,系统不可能记一次错误凭据。
+                    // 留着占位只会让用户白白重设一次,所以撤掉;同一次调用里只重来一轮,导航手势整次调用仍各只做一次。
+                    // 只撤这次自己落的那个占位:另一个可能是之前真失败落下的,不能顺手清掉。
+                    store.releaseAttempt(it, local)
+                    val current = read() ?: return@withLock result("device_unavailable")
+                    if (current.ready) return@withLock result("unlocked", current)
+                    if (round == ENTRY_ROUNDS) return@withLock result("input_failed", current)
                     delay(pollMs); waited += pollMs
+                    continue
                 }
+                // 按键没全送达也照样等系统状态:最后一位自动提交或回车生效后锁屏正在退场,焦点已离开 SystemUI,
+                // 收尾按键会被拒;只查一次会把这次成功的解锁当成失败,占位就再也清不掉。
+                now = await { s -> s.ready } ?: return@withLock result("device_unavailable")
+                if (now.ready) { store.completeAttempt(it); return@withLock result("unlocked", now, performedUnlock = true) }
+                return@withLock result(if (entry == CredentialEntry.Sent) "unlock_failed" else "input_failed", now)
             }
-            if (!targetReady) {
-                val current = read() ?: return@withLock result("device_unavailable")
-                if (current.ready) return@withLock result("unlocked", current)
-                if (!allowed()) return@withLock result("disabled", current)
-                if (!current.helperAvailable) return@withLock result("helper_unavailable", current)
-                val detected = port.detectedCredentialKind()
-                val diagnostics = port.credentialDiagnostics()
-                if (detected != null && detected != it.kind) {
-                    return@withLock result("credential_kind_mismatch", current, it.kind, detected, diagnostics)
-                }
-                return@withLock result("unsupported_keyguard", current, keyguardDiagnostics = diagnostics)
-            }
-            if (!allowed()) return@withLock result("disabled", read())
-            val reserved = if (local) store.beginLocalAttempt() else store.beginAttempt(it)
-            if (!reserved) return@withLock result("attempt_blocked", read())
-            // 从此刻起中断也保留占位,不重复输入。只有系统已解锁才清掉。
-            if (!allowed()) return@withLock result("disabled", read())
-            // 按键返回失败也照样等系统状态:最后一位自动提交或回车生效后锁屏正在退场,焦点已离开 SystemUI,
-            // 收尾按键会被拒;只查一次会把这次成功的解锁当成失败,占位就再也清不掉。
-            val entered = port.enter(it)
-            now = await { s -> s.ready } ?: return@withLock result("device_unavailable")
-            if (now.ready) { store.completeAttempt(it); result("unlocked", now, performedUnlock = true) }
-            else result(if (entered) "unlock_failed" else "input_failed", now)
+            result("input_failed", read())
         }
     }
 
@@ -199,4 +229,12 @@ class DeviceAccess(private val port: DeviceAccessPort, private val store: Device
         keyguardDiagnostics: List<String> = emptyList(), performedUnlock: Boolean = false) =
         DeviceAccessResult(status, s, store.enabled, store.credentialConfigured, store.attemptBlocked, storedKind, detectedKind,
             keyguardDiagnostics, performedUnlock)
+
+    private companion object {
+        /** 认不出凭据页多久后才上滑,以及上滑后多久才回退点击,单位是轮询周期。 */
+        const val REVEAL_AFTER_POLLS = 3
+        const val FALLBACK_AFTER_POLLS = 4
+        /** 一个键都没送达时,同一次调用里总共输入几轮。 */
+        const val ENTRY_ROUNDS = 2
+    }
 }

@@ -78,6 +78,31 @@ class DeviceAccessSettingsTest {
         fresh.credential()!!.use { assertFalse(fresh.beginAttempt(it)) }
     }
 
+    @Test fun releasingAnUnsentAttemptClearsOnlyThatLatch() {
+        val s = settings(); s.setCredential(CredentialKind.Pin, "123456"); s.setEnabled(true); s.setLocalEnabled(true)
+        s.credential()!!.use { c ->
+            assertTrue(s.beginAttempt(c)); assertTrue(s.beginLocalAttempt())
+            // 本机这次一个键都没送达:只撤本机占位,远程那个(可能是真失败落下的)留着,且随重启存活
+            s.releaseAttempt(c, local = true)
+            assertTrue(settings().attemptBlocked)
+            assertTrue(settings().beginLocalAttempt())
+        }
+        val reloaded = settings()
+        reloaded.credential()!!.use { c ->
+            reloaded.releaseAttempt(c, local = false)
+            assertFalse(reloaded.attemptBlocked)
+            assertFalse(reloaded.beginLocalAttempt())
+        }
+        // 拿着旧修订号的副本撤不掉新凭据下的占位
+        val stale = settings()
+        stale.credential()!!.use { old ->
+            stale.setCredential(CredentialKind.Pin, "654321")
+            stale.credential()!!.use { assertTrue(stale.beginAttempt(it)) }
+            stale.releaseAttempt(old, local = false)
+            assertTrue(stale.attemptBlocked)
+        }
+    }
+
     @Test fun corruptCiphertextAndLostKeyFailClosed() {
         val s = settings(); s.setCredential(CredentialKind.Pin, "123456"); s.setEnabled(true)
         val other = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()

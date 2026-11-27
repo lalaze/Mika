@@ -882,7 +882,7 @@ class ShellService(
     override fun dismissDeviceKeyguard(): Boolean = deviceUnlock.dismiss()
     override fun revealDeviceCredential(): Boolean = deviceUnlock.reveal()
     override fun revealDeviceCredentialTap(x: Int, y: Int): Boolean = deviceUnlock.tap(x, y)
-    override fun enterDeviceCredential(kind: Int, credential: ByteArray, clear: Int): Boolean = deviceUnlock.enter(kind, credential, clear)
+    override fun enterDeviceCredential(kind: Int, credential: ByteArray, clear: Int): Int = deviceUnlock.enter(kind, credential, clear)
 
     override fun openDevtoolsSocket(name: String): ParcelFileDescriptor? {
         val pid = DevtoolsSocket.pidOf(name) ?: return null

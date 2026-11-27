@@ -99,8 +99,7 @@ interface IMikaShell {
     // 主屏设备准备,与虚拟屏按键白名单分开;凭据只经 Binder 传入,不经 shell 命令行。
     boolean wakeDevice() = 41;
     boolean dismissDeviceKeyguard() = 42;
-    // clear=输入前要回删的已有字符数(空框为 0,避免在部分系统上空框 DEL 关掉密码页)
-    boolean enterDeviceCredential(int kind, in byte[] credential, int clear) = 43;
+    // 43 是只返回成败的旧版凭据输入,已由 64 取代;编号不复用,免得旧助手的返回值被读成别的意思。
 
     // 同 getAudioMode / setAudioMuted / setAudioMode,作用在 userId 那份用户里的那份(分身、工作资料);
     // userId 是 Mika 自己的用户时等同原来的几个。PLAY_AUDIO 按包 + 用户分开设,两份互不影响
@@ -152,6 +151,10 @@ interface IMikaShell {
 
     // 找同一份 App 的任务,优先指定屏、再主屏、再其他屏。返回 [taskId, displayId],无任务为空,读取失败为 null。
     @nullable int[] findTaskForPackage(String packageName, int userId, int displayId) = 63;
+
+    // 把凭据输入系统锁屏。clear=输入前要回删的已有字符数(空框为 0,避免在部分系统上空框 DEL 关掉密码页)。
+    // 0=一个键都没送达锁屏 1=按键全部送达(系统是否接受另看锁屏状态) 2=不确定(可能只输入了前几位)
+    int enterDeviceCredential(int kind, in byte[] credential, int clear) = 64;
 
     // 沿用早先定下的销毁事务号;AIDL 要求要么全部方法编号要么都不编号
     void destroy() = 16777114;

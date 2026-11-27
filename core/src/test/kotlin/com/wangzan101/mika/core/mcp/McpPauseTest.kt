@@ -2,6 +2,7 @@ package com.wangzan101.mika.core.mcp
 
 import com.wangzan101.mika.core.calls.PhoneCallPort
 import com.wangzan101.mika.core.calls.PhoneCallTask
+import com.wangzan101.mika.core.device.CredentialEntry
 import com.wangzan101.mika.core.device.CredentialKind
 import com.wangzan101.mika.core.device.DeviceAccess
 import com.wangzan101.mika.core.device.DeviceAccessPort
@@ -49,7 +50,7 @@ class McpPauseTest {
         override suspend fun wake(): Boolean { writes += "wake"; return true }
         override suspend fun dismiss(): Boolean { writes += "dismiss"; return true }
         override suspend fun credentialReady(kind: CredentialKind) = false
-        override suspend fun enter(credential: DeviceCredential): Boolean { writes += "enter"; return false }
+        override suspend fun enter(credential: DeviceCredential): CredentialEntry { writes += "enter"; return CredentialEntry.NotSent }
     }
     private val endpoints = RemoteEndpoints(
         FakeRemoteTasks(), "test", device = DeviceAccess(device, store), calls = calls, paused = PauseFlag { paused },

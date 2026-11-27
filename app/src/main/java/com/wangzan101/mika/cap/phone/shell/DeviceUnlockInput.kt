@@ -101,12 +101,33 @@ internal class DeviceUnlockInput(private val context: Context, private val injec
         return send(MotionEvent.ACTION_UP, downAt + TAP_MS)
     }
 
-    fun enter(kind: Int, bytes: ByteArray, clear: Int = 0): Boolean {
+    /**
+     * 返回 [ENTRY_NOT_SENT] / [ENTRY_SENT] / [ENTRY_INCOMPLETE]。调用方靠它决定要不要保留「失败后不再重试」的占位,
+     * 所以只有确定一个键都没送到锁屏才报未发送;送达过任何一个键、或某次注入拖了很久才失败(可能其实已送达)都算不确定。
+     */
+    fun enter(kind: Int, bytes: ByteArray, clear: Int = 0): Int {
+        var touched = false
+        val completed = type(kind, bytes, clear) { touched = true }
+        return when {
+            completed -> ENTRY_SENT
+            touched -> ENTRY_INCOMPLETE
+            else -> ENTRY_NOT_SENT
+        }
+    }
+
+    private fun type(kind: Int, bytes: ByteArray, clear: Int, onTouched: () -> Unit): Boolean {
         var chars = CharArray(0)
         var sent = false
         val target = systemUiUid
         val deadline = SystemClock.uptimeMillis() + 8_000
-        fun toKeyguard(event: InputEvent): Boolean { sent = true; return injectTo(event, target!!) }
+        fun toKeyguard(event: InputEvent): Boolean {
+            sent = true
+            val startedAt = SystemClock.uptimeMillis()
+            val delivered = injectTo(event, target!!)
+            // 系统拒绝定向注入是立刻返回的;拖了很久才失败的可能是等处理超时,按键也许已经到了锁屏。
+            if (delivered || SystemClock.uptimeMillis() - startedAt > REJECT_MS) onTouched()
+            return delivered
+        }
         try {
             if (target == null || !power.isInteractive || !keyguard.isKeyguardLocked || !keyguard.isDeviceLocked) return false
             val type = CredentialKind.entries.getOrNull(kind) ?: return false
@@ -153,10 +174,14 @@ internal class DeviceUnlockInput(private val context: Context, private val injec
         return send(down) && send(KeyEvent.changeAction(down, KeyEvent.ACTION_UP))
     }
 
-    private companion object {
-        const val SYSTEM_UI = "com.android.systemui"
-        const val MAX_CLEAR = 16
-        const val TAP_MS = 30L
-        val MODIFIERS = intArrayOf(KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.KEYCODE_SHIFT_RIGHT, KeyEvent.KEYCODE_ALT_LEFT, KeyEvent.KEYCODE_ALT_RIGHT)
+    companion object {
+        const val ENTRY_NOT_SENT = 0
+        const val ENTRY_SENT = 1
+        const val ENTRY_INCOMPLETE = 2
+        private const val SYSTEM_UI = "com.android.systemui"
+        private const val MAX_CLEAR = 16
+        private const val TAP_MS = 30L
+        private const val REJECT_MS = 1_000L
+        private val MODIFIERS = intArrayOf(KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.KEYCODE_SHIFT_RIGHT, KeyEvent.KEYCODE_ALT_LEFT, KeyEvent.KEYCODE_ALT_RIGHT)
     }
 }
